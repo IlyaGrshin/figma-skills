@@ -7,7 +7,7 @@
 // frames, slots), so it uses one loose type instead of per-type unions.
 type Loose = ReturnType<typeof JSON.parse>
 
-const VERSION = '1.2.0'
+const VERSION = '1.3.0'
 const PANEL_WIDTH = 360
 const DATA_NS = 'migrate_component' // shared plugin data namespace for the last report
 const REPORT_KEY = 'last_report'
@@ -79,7 +79,8 @@ const LIST_ITEM: Loose = {
     } else if (body.kind === '2 Line') {
       if (body.p.Action === 'True') return { skip: 'body: action link under title — no counterpart in List Item (library gap)' }
       if (body.p.Compact === 'True') notes.push('was compact')
-      if (/Medium/.test(body.p.Type)) notes.push('title was medium weight')
+      // The new title has no Medium variant; build() applies the matching */Medium text style.
+      if (/Medium/.test(body.p.Type)) b.medium = true
       b.type = 'Regular'
       b.title = { kind: 'text', node: text(body.n, 'Label') }
       const sub = body.n.findAllWithCriteria({ types: ['TEXT'] }).find((t: Loose) => t.name === 'Subtitle' && H.isShown(t, body.n) && t.parent.name !== 'Badge')
@@ -94,8 +95,10 @@ const LIST_ITEM: Loose = {
       if (tr) b.subtitle = { kind: 'train', node: tr }
     } else return { skip: 'body: ' + body.kind }
     if (!b.title.node) return { skip: 'body: no title' }
+    // A badge inside the subtitle Train travels with the Train; don't add it twice.
+    const within = (n: Loose, root: Loose) => { for (let p: Loose = n; p; p = p.parent) if (p.id === root.id) return true; return false }
     const badge = await inst(body.n, 'Badge')
-    if (badge) b.badge = badge
+    if (badge && !(b.subtitle && b.subtitle.kind === 'train' && within(badge, b.subtitle.node))) b.badge = badge
     b.lines = b.subtitle ? '2 Line ↑' : '1 Line'
     if (b.lines !== '1 Line' && b.type !== 'Regular') return { skip: 'body: ' + b.type + ' with 2 lines' }
     model.body = b
@@ -152,9 +155,24 @@ const LIST_ITEM: Loose = {
       H.setProps(L, { Type: m.left.type })
       await H.transplant(m.left.icon, L.children.find((c: Loose) => c.type === 'INSTANCE'), m.ov)
     }
+    // Old "Label Medium" titles used e.g. Body/Medium; give the new title (Body) the same */Medium style.
+    const keepMedium = async (root: Loose, oldLabel: Loose) => {
+      const slot = root.findOne((n: Loose) => n.type === 'INSTANCE' && n.name === 'Title')
+      const t = slot && H.firstText(slot)
+      const want = oldLabel.textStyleId
+      const oldS: Loose = t && want && want !== figma.mixed ? await figma.getStyleByIdAsync(want) : null
+      const newS: Loose = t && t.textStyleId && t.textStyleId !== figma.mixed ? await figma.getStyleByIdAsync(t.textStyleId) : null
+      if (oldS && newS && oldS.name === newS.name + '/Medium') {
+        await H.loadFonts(t)
+        await H.loadFont(oldS.fontName)
+        await t.setTextStyleIdAsync(want)
+        m.notes.push('title kept medium weight (' + oldS.name + ')')
+      } else m.notes.push('title was medium weight')
+    }
     const B = await part('List Item / Body')
     H.setProps(B, { Lines: m.body.lines, Type: m.body.type, Badge: m.body.badge ? 'True' : 'False' })
     await fill(B, 'Title', m.body.title, !!m.body.badge)
+    if (m.body.medium) await keepMedium(B, m.body.title.node)
     if (m.body.subtitle) await fill(B, 'Subtitle', m.body.subtitle, false)
     if (m.body.badge) {
       let nb: Loose
