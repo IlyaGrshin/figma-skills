@@ -7,7 +7,7 @@
 // frames, slots), so it uses one loose type instead of per-type unions.
 type Loose = ReturnType<typeof JSON.parse>
 
-const VERSION = '1.0.0'
+const VERSION = '1.0.1'
 const PANEL_WIDTH = 360
 const DATA_NS = 'migrate_component' // shared plugin data namespace for the last report
 const REPORT_KEY = 'last_report'
@@ -354,7 +354,10 @@ async function collect(recipe: Loose, roots: Loose[], stats: Loose) {
   const out: Loose[] = []
   for (const root of roots) {
     const list = root.type === 'INSTANCE' ? [root] : root.findAllWithCriteria({ types: ['INSTANCE'] })
+    let seen = 0
     for (const n of list) {
+      // Big pages have tens of thousands of instances: show progress, keep the UI alive.
+      if (++seen % 500 === 0) { post({ type: 'progress', text: `Ищу компоненты: ${seen}/${list.length}` }); await tick() }
       // Cheap prefilter: nested parts are handled with their root row.
       const lock = lockingInstance(n)
       const m = await mainCached(n)
@@ -502,16 +505,28 @@ async function focus(id: string) {
 function sendSelection() { post({ type: 'selection', count: figma.currentPage.selection.length, page: figma.currentPage.name }) }
 
 figma.showUI(__html__, { width: PANEL_WIDTH, height: 420 })
+
+// Handler first, so nothing below can leave the UI without a listener.
+figma.ui.onmessage = async (msg: Loose) => {
+  try {
+    if (msg.type === 'ready') { post({ type: 'init', version: VERSION, recipes: RECIPES.map((r: Loose) => ({ id: r.id, name: r.name })) }); sendSelection(); return }
+    if (msg.type === 'resize') { figma.ui.resize(PANEL_WIDTH, Math.max(160, Math.min(900, Math.round(msg.height)))); return }
+    if (msg.type === 'run') {
+      if (running) { log('Уже выполняется — дождитесь окончания', 'warn'); return }
+      await run(msg.mode === 'apply' ? 'apply' : 'dry', msg.scope, msg.recipe)
+      return
+    }
+    if (msg.type === 'focus') { await focus(msg.id); return }
+    if (msg.type === 'notify') { figma.notify(msg.text); return }
+  } catch (e) {
+    log('Ошибка: ' + (e as Error).message, 'error')
+    post({ type: 'done', report: null })
+  }
+}
+
 // key = relaunchButtons command from manifest.json
-figma.root.setRelaunchData({ '91e527f0-d0e1-456a-9e3c-fa488879636a': 'Заменить устаревшие компоненты' })
+try { figma.root.setRelaunchData({ '91e527f0-d0e1-456a-9e3c-fa488879636a': 'Заменить устаревшие компоненты' }) } catch (e) { log('Relaunch: ' + (e as Error).message, 'warn') }
 figma.on('selectionchange', sendSelection)
 figma.on('currentpagechange', sendSelection)
 post({ type: 'init', version: VERSION, recipes: RECIPES.map((r: Loose) => ({ id: r.id, name: r.name })) })
 sendSelection()
-
-figma.ui.onmessage = async (msg: Loose) => {
-  if (msg.type === 'resize') { figma.ui.resize(PANEL_WIDTH, Math.max(160, Math.min(900, Math.round(msg.height)))); return }
-  if (msg.type === 'run') { await run(msg.mode === 'apply' ? 'apply' : 'dry', msg.scope, msg.recipe); return }
-  if (msg.type === 'focus') { await focus(msg.id); return }
-  if (msg.type === 'notify') { figma.notify(msg.text); return }
-}
