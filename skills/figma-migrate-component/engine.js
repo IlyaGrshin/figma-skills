@@ -101,10 +101,23 @@ H.transplant = async (src, dst, ov) => {
     await H.copyTextOverrides(src, dst, ov);
   }
   if (src.type !== 'TEXT') await H.copyVisualOverrides(src, dst, ov);
+  // a resized icon (e.g. 28 → 24) keeps its size
+  const sz = ov.get(src.id) || [];
+  if ((sz.includes('width') || sz.includes('height')) && src.type === 'INSTANCE' && 'resize' in dst) dst.resize(src.width, src.height);
   if (dst.visible !== src.visible) dst.visible = src.visible;
   if ('children' in src && 'children' in dst && src.type !== 'TEXT') {
     const sc = src.children, dc = dst.children;
     if (sc.length === dc.length) for (let i = 0; i < sc.length; i++) await H.transplant(sc[i], dc[i], ov);
+    else {
+      // Structure differs (e.g. src comes from an outdated library version):
+      // pair children by name and hide what src doesn't have.
+      const used = new Set();
+      for (const d of dc) {
+        const s = sc.find(x => x.name === d.name && !used.has(x.id));
+        if (s) { used.add(s.id); await H.transplant(s, d, ov); }
+        else if (d.visible) d.visible = false;
+      }
+    }
   }
 };
 

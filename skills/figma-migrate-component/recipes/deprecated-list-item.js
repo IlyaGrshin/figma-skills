@@ -94,6 +94,7 @@ const RECIPE = {
       else if (k === 'Label + Chevron') Object.assign(r, { lines: '1 Line', type: 'Label + Chevron', title: { kind: 'text', node: text(right.n, 'Label') } });
       else if (k === 'Transaction / Subtitle + Label') Object.assign(r, { lines: '2 Line ↑', type: 'Regular', title: { kind: 'text', node: text(right.n, 'Label') }, subtitle: { kind: 'text', node: text(right.n, 'Subtitle') } });
       else if (k === 'Transaction / Subtitle + Train') Object.assign(r, { lines: '2 Line ↑', type: 'Regular', title: { kind: 'text', node: text(right.n, 'Label') }, subtitle: { kind: 'train', node: await inst(right.n, 'Train') } });
+      else if (k === 'Transaction / Subtitle + Label + Icon') Object.assign(r, { lines: '2 Line ↑', type: 'Regular + Icon', title: { kind: 'text', node: text(right.n, 'Label') }, subtitle: { kind: 'text', node: text(right.n, 'Subtitle') }, icon: right.n.children.find(c => c.type === 'INSTANCE' && c.visible) });
       else if (k === 'Checkmark') Object.assign(r, { lines: '1 Line', type: 'Checkmark' });
       else if (k === 'Clear') Object.assign(r, { lines: '1 Line', type: 'Clear' });
       else if (k === 'Switch') Object.assign(r, { lines: '1 Line', type: 'Switch', control: await inst(right.n, 'Switch') });
@@ -154,6 +155,7 @@ const RECIPE = {
       if (m.right.title) await fill(R, 'Title', m.right.title);
       if (m.right.subtitle) await fill(R, 'Subtitle', m.right.subtitle);
       if (m.right.control) await H.transplant(m.right.control, R.findOne(n => n.type === 'INSTANCE' && n.name === 'Switch'), m.ov);
+      if (m.right.icon) await H.transplant(m.right.icon, R.findOne(n => n.type === 'INSTANCE' && n.name === 'Icon'), m.ov);
     }
 
     // Library gap: Root hugs its body, so a tall Left (Avatar/Coin, 60px) with
