@@ -51,7 +51,8 @@ const RECIPE = {
       if (left.kind === 'Search Field') return { skip: 'search field row → use Text Field (Search) instead' };
       if (!LEFT[left.kind]) return { skip: 'left: ' + left.kind };
       if (left.p['Show Badge']) return { skip: 'left: icon badge has no counterpart' };
-      const icon = left.n.children.find(c => c.type === 'INSTANCE' && c.visible);
+      // Some Left variants wrap the icon in a Container frame.
+      const icon = H.shownInstances(left.n)[0];
       if (!icon) return { skip: 'left: no icon' };
       model.left = { type: LEFT[left.kind], icon };
     }

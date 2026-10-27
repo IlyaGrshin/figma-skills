@@ -7,7 +7,7 @@
 // frames, slots), so it uses one loose type instead of per-type unions.
 type Loose = ReturnType<typeof JSON.parse>
 
-const VERSION = '1.1.0'
+const VERSION = '1.1.1'
 const PANEL_WIDTH = 360
 const DATA_NS = 'migrate_component' // shared plugin data namespace for the last report
 const REPORT_KEY = 'last_report'
@@ -64,7 +64,8 @@ const LIST_ITEM: Loose = {
       if (left.kind === 'Search Field') return { skip: 'search field row → use Text Field (Search) instead' }
       if (!LEFT[left.kind]) return { skip: 'left: ' + left.kind }
       if (left.p['Show Badge']) return { skip: 'left: icon badge has no counterpart' }
-      const icon = left.n.children.find((c: Loose) => c.type === 'INSTANCE' && c.visible)
+      // Some Left variants wrap the icon in a Container frame.
+      const icon = H.shownInstances(left.n)[0]
       if (!icon) return { skip: 'left: no icon' }
       model.left = { type: LEFT[left.kind], icon }
     }
@@ -210,7 +211,8 @@ const mainCached = async (n: Loose) => {
   return mainCache.get(n.id)
 }
 H.main = (n: Loose) => buildingId && (n.id === buildingId || n.id.startsWith('I' + buildingId + ';')) ? mainOf(n) : mainCached(n)
-H.isShown = (node: Loose, root: Loose) => { for (let n: Loose = node; n && n !== root.parent; n = n.parent) if (!n.visible) return false; return true }
+// The root's own visibility doesn't count: hidden rows are migrated too (and stay hidden).
+H.isShown = (node: Loose, root: Loose) => { for (let n: Loose = node; n && n !== root; n = n.parent) if (!n.visible) return false; return true }
 H.isGlyph = (s: string) => [...s].every((ch: string) => { const c = ch.codePointAt(0) || 0; return (c >= 0xE000 && c <= 0xF8FF) || c >= 0xF0000 })
 H.visibleTexts = (root: Loose) => root.findAllWithCriteria({ types: ['TEXT'] }).filter((t: Loose) => H.isShown(t, root)).map((t: Loose) => t.characters.trim()).filter((s: Loose) => s && !H.isGlyph(s)).sort()
 // Texts coloured in parts ("$12.53B" black + "↑ 0.88%" green).

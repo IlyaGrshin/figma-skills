@@ -16,8 +16,9 @@ H.main = async (n) => {
   return { mc, set, setName: set ? set.name : mc.name, variant: set ? mc.name : '' };
 };
 
+// The root's own visibility doesn't count: hidden rows are migrated too (and stay hidden).
 H.isShown = (node, root) => {
-  for (let n = node; n && n !== root.parent; n = n.parent) if (!n.visible) return false;
+  for (let n = node; n && n !== root; n = n.parent) if (!n.visible) return false;
   return true;
 };
 
