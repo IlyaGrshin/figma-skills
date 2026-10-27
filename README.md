@@ -22,15 +22,16 @@ skills/figma-migrate-component/
   SKILL.md                 workflow + how to write a recipe
   engine.js                generic part: find, place, verify, roll back, report
   recipes/
-    deprecated-list-item.js  example: (Deprecated) List Item → List Item
-    section-slots.js         hand-built section frame → Section with Slots
+    deprecated-list-item.js    example: (Deprecated) List Item → List Item
+    section-slots.js           hand-built section frame → Section with Slots
+    deprecated-main-button.js  (Deprecated) Main Button → Fake Main Button
 ```
 
 The engine is generic; each component pair gets its own small recipe (`extract` + `build`). `recipes/deprecated-list-item.js` is a real recipe for one team library — use it as a template for yours.
 
 ## Plugin
 
-`plugin/` is the same engine and recipe packaged as a Figma **generative plugin** ("Migrate component", id `91e527f0-d0e1-456a-9e3c-fa488879636a`): pick a recipe and a scope (selection, page, whole file), run **Check** (dry run), then **Replace**. Rows that were not migrated are listed with the reason and a jump-to-layer link; the console log and **Copy report** give a JSON report, and the last report is also saved in the file (`figma.root.getSharedPluginData('migrate_component', 'last_report')`) so an agent can read it via the Figma MCP.
+`plugin/` is the same engine and recipe packaged as a Figma **generative plugin** ("Migrate component", id `91e527f0-d0e1-456a-9e3c-fa488879636a`): pick a recipe — or «Все нижеперечисленные» to run every recipe in one pass with per-recipe totals — and a scope (selection, page, whole file), run **Check** (dry run), then **Replace**. Rows that were not migrated are listed with the reason and a jump-to-layer link; the console log and **Copy report** give a JSON report, and the last report is also saved in the file (`figma.root.getSharedPluginData('migrate_component', 'last_report')`) so an agent can read it via the Figma MCP.
 
 The plugin source is deployed with the Figma MCP `update_generative_plugin` tool; keep `plugin/code.ts` in sync with `skills/figma-migrate-component` when a recipe changes.
 

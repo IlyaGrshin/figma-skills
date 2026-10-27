@@ -24,6 +24,12 @@ Files:
     (library 2 · UI · iOS). The rows are copied into the slot as they are.
     Hidden spare layers before the header or after the card (e.g. an unused
     banner card) move out next to the new Section, still hidden.
+  - `deprecated-main-button` — `(Deprecated) Main Button` → `Fake Main
+    Button` (library 2 · UI · iOS). One or two buttons, Vertical/Horizontal,
+    secondary on any side (order is kept: first → `Button`, second → `2
+    Button`); the round More button stays off. Buttons are the same `Button`
+    component on both sides and are transplanted whole. The new component has
+    its own side padding (26 vs 16) and gap (10 vs 16) — expected, not a bug.
 
 Load `figma:figma-use` first (mandatory before `use_figma`).
 

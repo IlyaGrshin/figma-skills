@@ -42,10 +42,12 @@
     <fig-content>
       <fig-field>
         <label>Компонент</label>
-        <!-- keep in sync with RECIPES in code.ts -->
+        <!-- keep in sync with RECIPES in code.ts; "all" runs them all in that order -->
         <fig-dropdown id="recipe">
+          <option value="all">Все нижеперечисленные</option>
           <option value="deprecated-list-item" selected>(Deprecated) List Item → List Item (iOS)</option>
           <option value="section-slots">Section (frame) → Section (Slots, iOS)</option>
+          <option value="deprecated-main-button">(Deprecated) Main Button → Fake Main Button (iOS)</option>
         </fig-dropdown>
       </fig-field>
       <fig-field>
@@ -93,6 +95,7 @@
 
     let lastReport = null
     let checkedKey = null // recipe|scope that passed a dry run; Apply needs it
+    let running = null // recipe|scope of the run in progress
     let selection = { count: 0, page: '' }
     let busy = false
     let inited = false
@@ -134,6 +137,7 @@
       if (busy) return
       const c = current()
       busy = true
+      running = keyOf(c)
       $('status').textContent = mode === 'apply' ? 'Заменяю…' : 'Проверяю…'
       log((mode === 'apply' ? 'Замена' : 'Проверка') + ' запущена · ' + SCOPE_LABEL[c.scope])
       refresh()
@@ -151,6 +155,13 @@
       if (report.mode === 'apply') { strong.textContent = 'Заменено: ' + t.migrated; head.append(strong, ' из ' + t.found + ' · пропущено ' + t.skipped + ' · откатов ' + t.failed) }
       else { strong.textContent = 'Можно заменить: ' + t.wouldMigrate; head.append(strong, ' из ' + t.found + ' · пропуск ' + t.skipped + ' · ошибок ' + t.failed) }
       box.appendChild(head)
+      const multi = report.recipes && report.recipes.length > 1
+      const shortOf = {}
+      for (const r of report.recipes || []) shortOf[r.id] = r.short || r.name
+      if (multi) for (const r of report.recipes) {
+        const rt = r.totals
+        line(r.short + ': ' + (report.mode === 'apply' ? 'заменено ' + rt.migrated : 'можно ' + rt.wouldMigrate) + ' из ' + rt.found + (rt.skipped ? ' · пропуск ' + rt.skipped : '') + (rt.failed ? ' · ' + (report.mode === 'apply' ? 'откатов ' : 'ошибок ') + rt.failed : ''))
+      }
       const locked = Object.entries(report.lockedIn)
       if (locked.length) line('Внутри библиотечных компонентов (исправлять в библиотеке): ' + locked.map(([k, v]) => k + ' ' + v).join(', '))
       const notes = Object.entries(report.notes)
@@ -169,7 +180,7 @@
         row.className = 'row ' + i.result
         const title = document.createElement('span')
         title.className = 'title'
-        title.textContent = (i.result === 'failed' ? '⚠ ' : '') + (i.screen || i.page) + (i.texts ? ' — ' + i.texts : '')
+        title.textContent = (i.result === 'failed' ? '⚠ ' : '') + (multi && shortOf[i.recipe] ? '[' + shortOf[i.recipe] + '] ' : '') + (i.screen || i.page) + (i.texts ? ' — ' + i.texts : '')
         const reason = document.createElement('span')
         reason.className = 'reason'
         reason.textContent = i.reason
@@ -243,13 +254,14 @@
         $('status').textContent = msg.text
       } else if (msg.type === 'done') {
         busy = false
+        const ran = running
+        running = null
         if (msg.report) {
           lastReport = msg.report
           render(msg.report)
           log(msg.report.error ? 'Остановлено с ошибкой' : msg.report.mode === 'apply' ? 'ГОТОВО — замена завершена' : 'Проверка завершена')
-          const c = { recipe: msg.report.recipe, scope: msg.report.scope }
-          // After a dry run the same scope can be applied; after apply, check again.
-          checkedKey = msg.report.mode === 'dry' && !msg.report.error ? keyOf(c) : null
+          // After a dry run the same choice and scope can be applied; after apply, check again.
+          checkedKey = msg.report.mode === 'dry' && !msg.report.error ? ran : null
           $('status').textContent = msg.report.mode === 'dry' ? 'Проверено — можно заменять' : 'Готово. Отчёт сохранён в файле'
         } else $('status').textContent = 'Сначала нажмите «Проверить»'
         refresh()
