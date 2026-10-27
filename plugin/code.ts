@@ -7,7 +7,7 @@
 // frames, slots), so it uses one loose type instead of per-type unions.
 type Loose = ReturnType<typeof JSON.parse>
 
-const VERSION = '1.1.2'
+const VERSION = '1.2.0'
 const PANEL_WIDTH = 360
 const DATA_NS = 'migrate_component' // shared plugin data namespace for the last report
 const REPORT_KEY = 'last_report'
@@ -530,8 +530,19 @@ async function run(mode: string, scope: string, recipeId: string) {
     report.pages = report.pages.filter((p: Loose) => p.found)
     saveReport(report)
     post({ type: 'done', report })
+    announce(report)
     running = false
   }
+}
+
+// Canvas toast, so the end is visible even with the plugin panel scrolled or covered.
+function announce(report: Loose) {
+  const t = report.totals
+  try {
+    if (report.error) figma.notify('Migrate component: ошибка — ' + report.error, { error: true, timeout: 8000 })
+    else if (report.mode === 'apply') figma.notify(`Готово: заменено ${t.migrated} из ${t.found}` + (t.failed ? ` · откатов ${t.failed}` : ''), { timeout: 8000 })
+    else figma.notify(`Проверка завершена: можно заменить ${t.wouldMigrate} из ${t.found}`, { timeout: 5000 })
+  } catch (_e) { }
 }
 
 // Keep the last report in the file so Claude can read it via MCP

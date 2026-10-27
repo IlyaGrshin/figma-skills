@@ -206,6 +206,7 @@
         if (msg.report) {
           lastReport = msg.report
           render(msg.report)
+          log(msg.report.error ? 'Остановлено с ошибкой' : msg.report.mode === 'apply' ? 'ГОТОВО — замена завершена' : 'Проверка завершена')
           const c = { recipe: msg.report.recipe, scope: msg.report.scope }
           // After a dry run the same scope can be applied; after apply, check again.
           checkedKey = msg.report.mode === 'dry' && !msg.report.error ? keyOf(c) : null
