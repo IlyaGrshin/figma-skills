@@ -3,9 +3,12 @@
 //   PARAMS = { pageId, scopeIds: [], mode: 'dry' | 'apply', limit: 300, keepOld: false }
 //   RECIPE = { name, sourceSets: [setName], target: { key, isSet },
 //              async extract(old, H) -> { model } | { skip: reason },
-//              async build(neu, model, H) }
+//              async build(neu, model, H),
+//              optional: findSources(scope, H), textFilter(node, root), async verify(old, neu, model, H) }
 // Guarantees: an instance is replaced only if the visible text of the new one
 // matches the old one exactly; otherwise the new one is removed and the old kept.
+// textFilter(node, root) prunes subtrees the plugin API can't read on the new
+// side (e.g. slot content); verify must then cover them another way.
 
 const H = {};
 
@@ -26,7 +29,17 @@ H.isShown = (node, root) => {
 // SF Symbols and other private-use glyphs are icons, not content.
 H.isGlyph = (s) => [...s].every(ch => { const c = ch.codePointAt(0); return (c >= 0xE000 && c <= 0xF8FF) || c >= 0xF0000; });
 
-H.visibleTexts = (root) => root.findAllWithCriteria({ types: ['TEXT'] })
+// keep(node, root) === false prunes the node and its subtree. Pruning matters:
+// walking into slot content can throw ("node … does not exist").
+H.texts = (root, keep) => {
+  if (!keep) return root.findAllWithCriteria({ types: ['TEXT'] });
+  const out = [];
+  const walk = (n) => { for (const c of n.children) if (keep(c, root)) c.type === 'TEXT' ? out.push(c) : 'children' in c && walk(c); };
+  walk(root);
+  return out;
+};
+
+H.visibleTexts = (root, keep) => H.texts(root, keep)
   .filter(t => H.isShown(t, root))
   .map(t => t.characters.trim())
   .filter(s => s && !H.isGlyph(s))
@@ -34,16 +47,17 @@ H.visibleTexts = (root) => root.findAllWithCriteria({ types: ['TEXT'] })
 
 // Texts coloured in parts, as "characters → colour per range". Comparing only
 // characters misses a multi-colour text that collapsed to one colour.
-H.multiColourTexts = (root) => {
+H.multiColourTexts = (root, keep) => {
   const out = {};
-  for (const t of root.findAllWithCriteria({ types: ['TEXT'] })) {
+  for (const t of H.texts(root, keep)) {
     if (!H.isShown(t, root) || t.fills !== figma.mixed) continue;
     out[t.characters.trim()] = JSON.stringify(t.getStyledTextSegments(['fills']).map(s => [s.start, s.end, s.fills.map(p => p.type === 'SOLID' ? [p.color, p.opacity] : p.type)]));
   }
   return out;
 };
 
-H.overrideMap = (inst) => new Map((inst.overrides || []).map(o => [o.id, o.overriddenFields]));
+// Only instances have overrides (on a frame the getter throws).
+H.overrideMap = (inst) => new Map((inst.type === 'INSTANCE' ? inst.overrides : []).map(o => [o.id, o.overriddenFields]));
 
 H.propKey = (inst, prefix) => Object.keys(inst.componentProperties).find(k => k === prefix || k.startsWith(prefix + '#'));
 
@@ -191,6 +205,9 @@ const lockingInstance = (n) => {
 };
 
 // ---- run ----
+// use_figma may default to skipping hidden layers inside instances; building
+// and verifying rely on full child lists (hidden rows, hidden parts).
+figma.skipInvisibleInstanceChildren = false;
 const page = await figma.getNodeByIdAsync(PARAMS.pageId);
 await figma.setCurrentPageAsync(page);
 const scopes = PARAMS.scopeIds && PARAMS.scopeIds.length
@@ -201,6 +218,11 @@ const candidates = [];
 const lockedIn = {};
 let otherLibrary = 0;
 for (const scope of scopes) {
+  // A recipe whose source is not an instance (e.g. a hand-built frame) finds its own sources.
+  if (RECIPE.findSources) {
+    for (const n of await RECIPE.findSources(scope, H)) if (!lockingInstance(n)) candidates.push(n);
+    continue;
+  }
   const list = scope.type === 'INSTANCE' ? [scope] : scope.findAllWithCriteria({ types: ['INSTANCE'] });
   for (const n of list) {
     const m = await H.main(n);
@@ -237,18 +259,20 @@ for (const old of candidates.slice(0, PARAMS.limit || 300)) {
   if (ex.skip) { report.skipped.push({ ...label, reason: ex.skip }); continue; }
   if (PARAMS.mode !== 'apply') { report.wouldMigrate++; continue; }
 
-  const before = H.visibleTexts(old);
-  const beforeColours = H.multiColourTexts(old);
+  const keep = RECIPE.textFilter;
+  const before = H.visibleTexts(old, keep);
+  const beforeColours = H.multiColourTexts(old, keep);
   const neu = target.createInstance();
   try {
     H.place(old, neu);
     const commit = await RECIPE.build(neu, ex.model, H);
     await H.copyVisualOverrides(old, neu, H.overrideMap(old)); // e.g. a recoloured row
-    const after = H.visibleTexts(neu);
+    const after = H.visibleTexts(neu, keep);
     if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error(`text mismatch: [${before.join(', ')}] → [${after.join(', ')}]`);
-    const afterColours = H.multiColourTexts(neu);
+    const afterColours = H.multiColourTexts(neu, keep);
     for (const [txt, sig] of Object.entries(beforeColours))
       if (afterColours[txt] !== sig) throw new Error(`multi-colour text lost its colours: "${txt}"`);
+    if (RECIPE.verify) await RECIPE.verify(old, neu, ex.model, H);
     // changes outside the new instance happen only once it is verified
     if (typeof commit === 'function') await commit();
     if (Math.abs(old.height - neu.height) > 1) (ex.model.notes = ex.model.notes || []).push(`height ${Math.round(old.height)}→${Math.round(neu.height)}`);

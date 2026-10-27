@@ -19,6 +19,11 @@ Files:
   `build(new, model)`. Available recipes:
   - `deprecated-list-item` — `(Deprecated) List Item` → `List Item`
     (library 2 · UI · iOS).
+  - `section-slots` — hand-built section frame (`Section / Header & Footer`
+    + rounded card with rows + optional footer) → `Section` with Slots
+    (library 2 · UI · iOS). The rows are copied into the slot as they are.
+    Hidden spare layers before the header or after the card (e.g. an unused
+    banner card) move out next to the new Section, still hidden.
 
 Load `figma:figma-use` first (mandatory before `use_figma`).
 
@@ -61,6 +66,16 @@ Load `figma:figma-use` first (mandatory before `use_figma`).
   range by range and their per-range colours are verified too.
 - Instances inside other instances are not touched (they can't be edited),
   except inside a `SLOT`, whose content is editable.
+- Slot content can't be fully read back: the plugin API reports sublayers of
+  swapped nested instances inside a slot as "does not exist" (the file is
+  fine, only reading fails). A recipe that fills a slot excludes it from the
+  text check with `textFilter` and proves it with `verify` instead —
+  `section-slots` compares PNG exports of the old card and the new slot
+  byte for byte (the plugin, whose renderer can shift anti-aliasing by a
+  fraction of a pixel, decodes both in its UI and allows ≤0.5% differing
+  pixels).
+- The engine sets `figma.skipInvisibleInstanceChildren = false`: with the
+  `use_figma` default, hidden rows and parts are missing from `children`.
 - Colour / text-style / font overrides are copied only if they were actually
   overridden on the old instance (`instance.overrides`), so the new
   component's tokens are not clobbered with stale hard-coded values.
@@ -83,6 +98,14 @@ Load `figma:figma-use` first (mandatory before `use_figma`).
      library (e.g. Android) has components with the same names.
    - `guardScreen(screen)` (optional) — return a reason to skip a whole
      screen, e.g. Android mockups (360px wide) for an iOS recipe.
+   - `findSources(scope, H)` (optional) — for sources that are not
+     instances (e.g. hand-built frames): return the candidate nodes inside
+     `scope` (scope itself included); `sourceSets` is then unused.
+   - `textFilter(node, root)` (optional) — return false to leave a node and
+     its subtree out of the text check on both sides (e.g. slot content, see
+     above). It prunes the walk: even traversing slot content can throw.
+   - `verify(old, neu, model, H)` (optional) — extra check after the text
+     check; throw to roll back. Required when `textFilter` hides content.
    - `target.key` — published key of the new component (or set; `isSet:
      true` uses its default variant).
    - `extract(old, H)` returns `{ model }` or `{ skip: 'reason' }`. Keep

@@ -23,6 +23,7 @@ skills/figma-migrate-component/
   engine.js                generic part: find, place, verify, roll back, report
   recipes/
     deprecated-list-item.js  example: (Deprecated) List Item → List Item
+    section-slots.js         hand-built section frame → Section with Slots
 ```
 
 The engine is generic; each component pair gets its own small recipe (`extract` + `build`). `recipes/deprecated-list-item.js` is a real recipe for one team library — use it as a template for yours.

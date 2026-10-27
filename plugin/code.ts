@@ -7,12 +7,16 @@
 // frames, slots), so it uses one loose type instead of per-type unions.
 type Loose = ReturnType<typeof JSON.parse>
 
-const VERSION = '1.3.0'
+const VERSION = '1.4.4'
 const PANEL_WIDTH = 360
 const DATA_NS = 'migrate_component' // shared plugin data namespace for the last report
 const REPORT_KEY = 'last_report'
+const RECIPE_KEY = 'last_recipe' // clientStorage: the recipe picked last time, per user
 const MAX_REPORT_CHARS = 90000
 const CHECK_TTL_MS = 15 * 60 * 1000 // Replace reuses a check this fresh instead of searching again
+// Share of pixels that may differ (by more than PIXEL_DELTA in a channel) in a pixel check.
+const PIXEL_TOLERANCE = 0.005
+const PIXEL_DELTA = 24
 
 // ===================================================================== recipes
 
@@ -208,7 +212,162 @@ const LIST_ITEM: Loose = {
   },
 }
 
-const RECIPES: Loose[] = [LIST_ITEM]
+// Hand-built section → Section (Slots), library 2 · UI · iOS. Old = a plain
+// vertical frame (16px side padding) with a "Section / Header & Footer" header,
+// a rounded filled card holding the rows and an optional footer. New = "Section"
+// instance with Header & Footer and a SLOT for the rows.
+const HF_KEY = '76e5b4fe8a0cf330a4b6653dde80db72e2094df8' // Section / Header & Footer
+const SECTION: Loose = {
+  id: 'section-slots',
+  name: 'Section (frame) → Section (Slots, iOS)',
+  sourceSets: [],
+  target: { key: '18a34cb824f4d3b9ac285d0635d2a28ffe167259', isSet: false },
+  guardScreen: (screen: Loose) => screen && screen.width <= 360 ? 'android screen (360px) — not an iOS recipe' : null,
+
+  // The source is a frame, not an instance: frames that hold a header/footer,
+  // or a single card with a section's side padding. extract() decides the rest.
+  async findSources(root: Loose, H: Loose) {
+    const frames: Loose[] = root.type === 'FRAME' ? [root] : []
+    if ('findAllWithCriteria' in root) frames.push(...root.findAllWithCriteria({ types: ['FRAME'] }))
+    const out: Loose[] = []
+    for (const f of frames) {
+      if (f.layoutMode !== 'VERTICAL') continue
+      let hasHF = false
+      for (const c of f.children) if (c.type === 'INSTANCE' && await SECTION.role(c, H)) { hasHF = true; break }
+      const loneCard = f.children.length === 1 && SECTION.isCard(f.children[0]) && f.paddingLeft === 16 && f.paddingRight === 16
+      if (hasHF || loneCard) out.push(f)
+    }
+    return out
+  },
+  // 'header' | 'footer' | null
+  async role(n: Loose, H: Loose) {
+    if (n.type !== 'INSTANCE') return null
+    const m = await H.main(n)
+    if (!m || !m.set || m.set.key !== HF_KEY) return null
+    return m.variant.includes('Footer') ? 'footer' : 'header'
+  },
+  isCard: (n: Loose) => n.type === 'FRAME' && n.layoutMode === 'VERTICAL'
+    && n.cornerRadius !== figma.mixed && n.cornerRadius >= 8
+    && n.fills !== figma.mixed && n.fills.some((f: Loose) => f.visible !== false && f.type === 'SOLID'),
+
+  // Inside slot content the plugin API can't read sublayers of swapped nested
+  // instances (they "don't exist"), so the text check covers header/footer
+  // only and verify() compares the rows pixel by pixel.
+  textFilter: (n: Loose, root: Loose) => !(n.type === 'SLOT' || (n.parent.id === root.id && SECTION.isCard(n))),
+  // Each side is exported with the other one hidden, so both sit at the same
+  // place: the new section is inserted above the old one, and a screen that
+  // clips its content would cut the lower one off. Bytes can differ while the
+  // picture is the same (anti-aliasing a fraction of a pixel off), so the UI
+  // decodes both and counts pixels that really differ. Fresh copies can still
+  // be loading images (coin icons), so a mismatch is checked again after a pause.
+  // The library slot has smooth (iOS) corners; it keeps them, so the slot is
+  // compared with the card's smoothing for a moment.
+  async verify(old: Loose, neu: Loose, m: Loose) {
+    const slot = neu.children.find((c: Loose) => c.type === 'SLOT')
+    const png = (n: Loose) => n.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 1 } })
+    const alone = async (show: Loose, hide: Loose) => { const v = hide.visible; hide.visible = false; try { return await png(show) } finally { hide.visible = v } }
+    const wait = (ms: number) => new Promise<void>((r: Loose) => setTimeout(r, ms))
+    let why = ''
+    const same = async () => {
+      const a = await alone(m.card, neu), b = await alone(slot, old)
+      if (a.length === b.length && a.every((v: number, i: number) => v === b[i])) return true
+      const d = await H.pixelDiff(a, b)
+      if (!d) { why = a.length + ' → ' + b.length + ' bytes'; return false }
+      if (d.size !== d.size2) { why = 'size ' + d.size + ' → ' + d.size2; return false }
+      why = d.diff + ' of ' + d.total + ' px differ, max Δ ' + d.maxDelta
+      if (d.diff > d.total * PIXEL_TOLERANCE) return false
+      m.notes.push('rows match within anti-aliasing')
+      return true
+    }
+    const smoothing = slot.cornerSmoothing
+    if (m.card.cornerSmoothing !== smoothing) { slot.cornerSmoothing = m.card.cornerSmoothing; m.notes.push('corner smoothing ' + m.card.cornerSmoothing + ' → ' + smoothing + ' (library)') }
+    try {
+      let ok = await same()
+      for (const ms of [0, 300, 1000, 2000]) { if (ok) break; await wait(ms); ok = await same() }
+      if (!ok) throw new Error('rows render differently in the slot than in the old card (' + why + ')')
+    }
+    finally { if (slot.cornerSmoothing !== smoothing) slot.cornerSmoothing = smoothing }
+  },
+
+  async extract(old: Loose, H: Loose) {
+    const all: Loose[] = []
+    for (const c of old.children) all.push({ n: c, kind: (await SECTION.role(c, H)) || (SECTION.isCard(c) ? 'card' : 'other') })
+    const sig = all.map((p: Loose) => p.kind + (p.n.visible ? '' : ' (hidden)')).join(' + ')
+    // Hidden layers other than header/footer (e.g. a spare card) have no place
+    // in the Section: they move out next to it, still hidden. Only at the
+    // start or the end, so their order relative to the section is kept.
+    const spare = (p: Loose) => !p.n.visible && (p.kind === 'card' || p.kind === 'other')
+    let a = 0, b = all.length
+    while (a < b && spare(all[a])) a++
+    while (b > a && spare(all[b - 1])) b--
+    const parts = all.slice(a, b)
+    if (parts.some(spare)) return { skip: 'hidden layer between header and card: ' + sig }
+    const cards = parts.filter((p: Loose) => p.kind === 'card')
+    if (parts.some((p: Loose) => p.kind === 'other')) return { skip: 'extra layers next to the card: ' + sig }
+    if (cards.length !== 1) return { skip: cards.length ? cards.length + ' cards in one section: ' + sig : 'no card: ' + sig }
+    if (!/^(header,)?card(,footer)?$/.test(parts.map((p: Loose) => p.kind).join(','))) return { skip: 'unexpected order: ' + sig }
+    const card = cards[0].n
+    if (!card.visible) return { skip: 'card is hidden' }
+    if (old.itemSpacing !== 0 && parts.length > 1) return { skip: 'gap ' + old.itemSpacing + ' between header and card' }
+    if (card.children.some((c: Loose) => c.layoutPositioning === 'ABSOLUTE')) return { skip: 'card has absolutely positioned layers' }
+    const header = parts.find((p: Loose) => p.kind === 'header')
+    const footer = parts.find((p: Loose) => p.kind === 'footer')
+    const bg = old.fills !== figma.mixed ? old.fills.filter((f: Loose) => f.visible !== false) : []
+    return { model: { notes: [], card, header: header && header.n, footer: footer && footer.n, bg: bg.length ? old.fills : null, name: old.name,
+      above: all.slice(0, a).map((p: Loose) => p.n), below: all.slice(b).map((p: Loose) => p.n) } }
+  },
+
+  async build(neu: Loose, m: Loose, H: Loose) {
+    H.setProps(neu, { Header: !!m.header, Footer: !!m.footer })
+    const slot = neu.children.find((c: Loose) => c.type === 'SLOT')
+    if (!slot) throw new Error('new Section has no slot')
+    const at = neu.children.indexOf(slot)
+    const newHeader = neu.children.slice(0, at).find((c: Loose) => c.type === 'INSTANCE')
+    const newFooter = neu.children.slice(at + 1).find((c: Loose) => c.type === 'INSTANCE')
+    // Same component set on both sides: copy variant, props, texts.
+    if (m.header) await H.transplant(m.header, newHeader, H.overrideMap(m.header))
+    if (m.footer) await H.transplant(m.footer, newFooter, H.overrideMap(m.footer))
+
+    // The section frame itself: padding and a background, if any.
+    const wrapper = m.card.parent
+    for (const k of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'])
+      if (neu[k] !== wrapper[k]) { neu[k] = wrapper[k]; m.notes.push('section ' + k + ' ' + wrapper[k]) }
+    if (m.bg) { neu.fills = m.bg; m.notes.push('section background kept') }
+
+    // The card's look goes to the slot only where it differs from the library.
+    const same = (a: Loose, b: Loose) => JSON.stringify(a) === JSON.stringify(b)
+    const card = m.card
+    if (card.fillStyleId && card.fillStyleId !== figma.mixed) { if (slot.fillStyleId !== card.fillStyleId) { await slot.setFillStyleIdAsync(card.fillStyleId); m.notes.push('card fill style kept') } }
+    else if (!same(slot.fills, card.fills)) { slot.fills = card.fills; m.notes.push('card fill kept') }
+    for (const k of ['cornerRadius', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing', 'primaryAxisAlignItems', 'counterAxisAlignItems', 'strokeAlign'])
+      if (card[k] !== figma.mixed && slot[k] !== card[k]) { slot[k] = card[k]; m.notes.push('card ' + k + ' ' + card[k]) }
+    for (const k of ['strokes', 'effects'])
+      if (card[k].length && !same(slot[k], card[k])) { slot[k] = card[k]; if (k === 'strokes') slot.strokeWeight = card.strokeWeight; m.notes.push('card ' + k + ' kept') }
+    if (card.clipsContent !== slot.clipsContent) slot.clipsContent = card.clipsContent
+
+    // Rows: copies of the card's children, hidden ones included, in order.
+    // Copies, not moves: on a rollback the old section is still intact.
+    for (const c of [...slot.children]) c.remove()
+    for (const c of card.children) {
+      slot.appendChild(c.clone())
+      const k = slot.children[slot.children.length - 1] // fresh handle: the clone's may go stale after append
+      if (k.layoutSizingHorizontal !== c.layoutSizingHorizontal) k.layoutSizingHorizontal = c.layoutSizingHorizontal
+      if (k.layoutSizingVertical !== c.layoutSizingVertical) k.layoutSizingVertical = c.layoutSizingVertical
+    }
+    if (card.children.length !== slot.children.length) throw new Error('rows ' + card.children.length + ' → ' + slot.children.length)
+    neu.name = m.name
+
+    // Hidden spare layers: copies go next to the section once it is verified.
+    if (m.above.length || m.below.length) return () => {
+      const out = (n: Loose, at: number) => { const k = n.clone(); neu.parent.insertChild(at, k); k.visible = false; if (neu.parent.layoutMode === 'NONE') { k.x = neu.x + n.x; k.y = neu.y + n.y } }
+      for (const n of m.above) out(n, neu.parent.children.indexOf(neu))
+      for (const n of [...m.below].reverse()) out(n, neu.parent.children.indexOf(neu) + 1)
+      m.notes.push('hidden layers moved next to the section')
+    }
+  },
+}
+
+const RECIPES: Loose[] = [LIST_ITEM, SECTION]
 
 // ====================================================================== engine
 
@@ -217,7 +376,7 @@ const mainOf = async (n: Loose) => {
   const mc = await n.getMainComponentAsync()
   if (!mc) return null
   const set = mc.parent && mc.parent.type === 'COMPONENT_SET' ? mc.parent : null
-  return { mc, set, setName: set ? set.name : mc.name }
+  return { mc, set, setName: set ? set.name : mc.name, variant: set ? mc.name : '' }
 }
 // Old layers never change, so their lookups are cached. Layers of the instance
 // being built keep their ids while variants change: never cache those
@@ -233,17 +392,27 @@ H.main = (n: Loose) => buildingId && (n.id === buildingId || n.id.startsWith('I'
 // Compare ids: `parent` may return a different object for the same layer.
 H.isShown = (node: Loose, root: Loose) => { for (let n: Loose = node; n && n.id !== root.id; n = n.parent) if (!n.visible) return false; return true }
 H.isGlyph = (s: string) => [...s].every((ch: string) => { const c = ch.codePointAt(0) || 0; return (c >= 0xE000 && c <= 0xF8FF) || c >= 0xF0000 })
-H.visibleTexts = (root: Loose) => root.findAllWithCriteria({ types: ['TEXT'] }).filter((t: Loose) => H.isShown(t, root)).map((t: Loose) => t.characters.trim()).filter((s: Loose) => s && !H.isGlyph(s)).sort()
+// keep: a recipe's textFilter; false prunes the node and its subtree. Pruning
+// matters: walking into slot content can throw ("node … does not exist").
+H.texts = (root: Loose, keep?: Loose) => {
+  if (!keep) return root.findAllWithCriteria({ types: ['TEXT'] })
+  const out: Loose[] = []
+  const walk = (n: Loose) => { for (const c of n.children) if (keep(c, root)) { if (c.type === 'TEXT') out.push(c); else if ('children' in c) walk(c) } }
+  walk(root)
+  return out
+}
+H.visibleTexts = (root: Loose, keep?: Loose) => H.texts(root, keep).filter((t: Loose) => H.isShown(t, root)).map((t: Loose) => t.characters.trim()).filter((s: Loose) => s && !H.isGlyph(s)).sort()
 // Texts coloured in parts ("$12.53B" black + "↑ 0.88%" green).
-H.multiColourTexts = (root: Loose) => {
+H.multiColourTexts = (root: Loose, keep?: Loose) => {
   const out: Record<string, string> = {}
-  for (const t of root.findAllWithCriteria({ types: ['TEXT'] })) {
+  for (const t of H.texts(root, keep)) {
     if (!H.isShown(t, root) || t.fills !== figma.mixed) continue
     out[t.characters.trim()] = JSON.stringify(t.getStyledTextSegments(['fills']).map((s: Loose) => [s.start, s.end, s.fills.map((p: Loose) => p.type === 'SOLID' ? [p.color, p.opacity] : p.type)]))
   }
   return out
 }
-H.overrideMap = (inst: Loose) => new Map<string, string[]>((inst.overrides || []).map((o: Loose) => [o.id, o.overriddenFields]))
+// Only instances have overrides (on a frame the getter throws).
+H.overrideMap = (inst: Loose) => new Map<string, string[]>((inst.type === 'INSTANCE' ? inst.overrides : []).map((o: Loose) => [o.id, o.overriddenFields]))
 H.propKey = (inst: Loose, prefix: string) => Object.keys(inst.componentProperties).find((k: Loose) => k === prefix || k.startsWith(prefix + '#'))
 H.setProps = (inst: Loose, byPrefix: Loose) => {
   const out: Loose = {}
@@ -380,6 +549,18 @@ const post = (msg: Loose) => figma.ui.postMessage(msg)
 const log = (text: string, level?: string) => post({ type: 'log', text, level: level || 'info' })
 const tick = () => new Promise<void>((r: Loose) => setTimeout(r, 0))
 
+// The sandbox can't decode PNGs; the UI iframe does it with a canvas.
+// Resolves { size, size2, total, diff, maxDelta }, or null if the UI can't.
+const pixelReplies = new Map<number, Loose>()
+let pixelSeq = 0
+H.pixelDiff = (a: Uint8Array, b: Uint8Array) => new Promise<Loose>((resolve: Loose) => {
+  const id = ++pixelSeq
+  const done = (r: Loose) => { if (pixelReplies.delete(id)) resolve(r) }
+  pixelReplies.set(id, done)
+  post({ type: 'pixdiff', id, a, b, delta: PIXEL_DELTA })
+  setTimeout(() => done(null), 5000)
+})
+
 let running = false
 // Last successful check: candidate ids per page, so Replace can skip the search.
 let lastCheck: Loose = null
@@ -396,6 +577,11 @@ async function collect(recipe: Loose, roots: Loose[], stats: Loose) {
   figma.skipInvisibleInstanceChildren = true
   try {
   for (const root of roots) {
+    // A recipe whose source is not an instance (e.g. a hand-built frame) finds its own sources.
+    if (recipe.findSources) {
+      for (const n of await recipe.findSources(root, H)) if (!lockingInstance(n)) out.push(n)
+      continue
+    }
     const list = root.type === 'INSTANCE' ? [root] : root.findAllWithCriteria({ types: ['INSTANCE'] })
     let seen = 0
     for (const n of list) {
@@ -464,7 +650,7 @@ async function run(mode: string, scope: string, recipeId: string) {
         stats = { otherLibrary: cached.otherLibrary, lockedIn: cached.lockedIn }
         for (const id of cached.ids) {
           const n = await figma.getNodeByIdAsync(id)
-          if (n && !n.removed && n.type === 'INSTANCE') candidates.push(n)
+          if (n && !n.removed) candidates.push(n)
         }
       } else candidates = await collect(recipe, step.roots, stats)
       T.search += ms(t)
@@ -484,8 +670,8 @@ async function run(mode: string, scope: string, recipeId: string) {
         if (i % 20 === 0) { post({ type: 'progress', text: `«${page.name}»: ${i}/${candidates.length}` }); await tick() }
         const scr = screenOf(old)
         t = Date.now()
-        const before = H.visibleTexts(old)
-        const item: Loose = { page: page.name, screen: scr ? scr.name : '', screenId: scr ? scr.id : null, id: old.id, texts: before.join(' | ').slice(0, 80) }
+        const before = H.visibleTexts(old, recipe.textFilter)
+        const item: Loose = { page: page.name, screen: scr ? scr.name : '', screenId: scr ? scr.id : null, id: old.id, texts: (recipe.textFilter ? H.visibleTexts(old) : before).join(' | ').slice(0, 80) }
         const guard = recipe.guardScreen && recipe.guardScreen(scr)
         let ex: Loose
         if (guard) ex = { skip: guard }
@@ -501,7 +687,7 @@ async function run(mode: string, scope: string, recipeId: string) {
         }
         if (mode !== 'apply') { report.totals.wouldMigrate++; continue }
 
-        const beforeColours = H.multiColourTexts(old)
+        const beforeColours = H.multiColourTexts(old, recipe.textFilter)
         t = Date.now()
         const neu = target.createInstance()
         try {
@@ -510,10 +696,11 @@ async function run(mode: string, scope: string, recipeId: string) {
           const commit = await recipe.build(neu, ex.model, H)
           await H.copyVisualOverrides(old, neu, H.overrideMap(old))
           T.build += ms(t); t = Date.now()
-          const after = H.visibleTexts(neu)
+          const after = H.visibleTexts(neu, recipe.textFilter)
           if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('text mismatch: [' + before.join(', ') + '] → [' + after.join(', ') + ']')
-          const afterColours = H.multiColourTexts(neu)
+          const afterColours = H.multiColourTexts(neu, recipe.textFilter)
           for (const [txt, sig] of Object.entries<string>(beforeColours)) if (afterColours[txt] !== sig) throw new Error('multi-colour text lost its colours: "' + txt + '"')
+          if (recipe.verify) await recipe.verify(old, neu, ex.model, H)
           T.verify += ms(t); t = Date.now()
           if (typeof commit === 'function') await commit()
           if (Math.abs(old.height - neu.height) > 1) ex.model.notes.push('height ' + Math.round(old.height) + '→' + Math.round(neu.height))
@@ -587,6 +774,13 @@ async function focus(id: string) {
   figma.viewport.scrollAndZoomIntoView([node as SceneNode])
 }
 
+// The UI opens on the recipe picked last time.
+async function sendInit() {
+  let recipe: Loose = null
+  try { recipe = await figma.clientStorage.getAsync(RECIPE_KEY) } catch (_e) { }
+  post({ type: 'init', version: VERSION, recipe, recipes: RECIPES.map((r: Loose) => ({ id: r.id, name: r.name })) })
+}
+
 function sendSelection() { post({ type: 'selection', count: figma.currentPage.selection.length, page: figma.currentPage.name }) }
 
 figma.showUI(__html__, { width: PANEL_WIDTH, height: 420 })
@@ -594,7 +788,9 @@ figma.showUI(__html__, { width: PANEL_WIDTH, height: 420 })
 // Handler first, so nothing below can leave the UI without a listener.
 figma.ui.onmessage = async (msg: Loose) => {
   try {
-    if (msg.type === 'ready') { post({ type: 'init', version: VERSION, recipes: RECIPES.map((r: Loose) => ({ id: r.id, name: r.name })) }); sendSelection(); return }
+    if (msg.type === 'ready') { await sendInit(); sendSelection(); return }
+    if (msg.type === 'recipe') { if (RECIPES.some((r: Loose) => r.id === msg.id)) await figma.clientStorage.setAsync(RECIPE_KEY, msg.id); return }
+    if (msg.type === 'pixdiff') { const r = pixelReplies.get(msg.id); if (r) r(msg.result); return }
     if (msg.type === 'resize') { figma.ui.resize(PANEL_WIDTH, Math.max(160, Math.min(900, Math.round(msg.height)))); return }
     if (msg.type === 'run') {
       if (running) { log('Уже выполняется — дождитесь окончания', 'warn'); return }
@@ -613,5 +809,4 @@ figma.ui.onmessage = async (msg: Loose) => {
 try { figma.root.setRelaunchData({ '91e527f0-d0e1-456a-9e3c-fa488879636a': 'Заменить устаревшие компоненты' }) } catch (e) { log('Relaunch: ' + (e as Error).message, 'warn') }
 figma.on('selectionchange', sendSelection)
 figma.on('currentpagechange', sendSelection)
-post({ type: 'init', version: VERSION, recipes: RECIPES.map((r: Loose) => ({ id: r.id, name: r.name })) })
-sendSelection()
+sendInit().then(sendSelection)

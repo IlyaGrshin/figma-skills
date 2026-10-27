@@ -45,6 +45,7 @@
         <!-- keep in sync with RECIPES in code.ts -->
         <fig-dropdown id="recipe">
           <option value="deprecated-list-item" selected>(Deprecated) List Item → List Item (iOS)</option>
+          <option value="section-slots">Section (frame) → Section (Slots, iOS)</option>
         </fig-dropdown>
       </fig-field>
       <fig-field>
@@ -119,6 +120,16 @@
     }
     function setDisabled(id, v) { if (v) $(id).setAttribute('disabled', '') ; else $(id).removeAttribute('disabled') }
 
+    // Select a recipe by id (the one picked last time); unknown ids are ignored.
+    function setRecipe(id) {
+      const dd = $('recipe')
+      const opts = [...dd.querySelectorAll('option')]
+      if (!opts.some(o => o.value === id)) return
+      for (const o of opts) o.selected = o.value === id
+      dd.setAttribute('value', id)
+      try { dd.value = id } catch (e) { }
+    }
+
     function run(mode) {
       if (busy) return
       const c = current()
@@ -187,13 +198,42 @@
     $('apply').addEventListener('click', () => run('apply'))
     $('copy').addEventListener('click', copyReport)
     $('scope').addEventListener('change', refresh)
-    $('recipe').addEventListener('change', refresh)
+    $('recipe').addEventListener('change', () => { post({ type: 'recipe', id: current().recipe }); refresh() })
+
+    // Pixel check for the sandbox, which can't decode PNGs. Counts pixels where
+    // any channel differs by more than `delta`.
+    async function pixelDiff(msg) {
+      try {
+        const load = async (bytes) => {
+          const img = await createImageBitmap(new Blob([bytes], { type: 'image/png' }))
+          const c = document.createElement('canvas')
+          c.width = img.width; c.height = img.height
+          const ctx = c.getContext('2d')
+          ctx.drawImage(img, 0, 0)
+          return { w: img.width, h: img.height, px: ctx.getImageData(0, 0, img.width, img.height).data }
+        }
+        const x = await load(msg.a), y = await load(msg.b)
+        const result = { size: x.w + '×' + x.h, size2: y.w + '×' + y.h, total: x.w * x.h, diff: 0, maxDelta: 0 }
+        if (x.w === y.w && x.h === y.h) {
+          for (let i = 0; i < x.px.length; i += 4) {
+            let d = 0
+            for (let k = 0; k < 4; k++) d = Math.max(d, Math.abs(x.px[i + k] - y.px[i + k]))
+            if (d > result.maxDelta) result.maxDelta = d
+            if (d > msg.delta) result.diff++
+          }
+        }
+        post({ type: 'pixdiff', id: msg.id, result })
+      } catch (e) {
+        post({ type: 'pixdiff', id: msg.id, result: null })
+      }
+    }
 
     window.onmessage = (event) => {
       const msg = event.data && event.data.pluginMessage
       if (!msg) return
+      if (msg.type === 'pixdiff') { pixelDiff(msg); return }
       if (msg.type === 'init') {
-        if (!inited) { inited = true; log('Migrate component v' + msg.version + ' готов') }
+        if (!inited) { inited = true; if (msg.recipe) setRecipe(msg.recipe); log('Migrate component v' + msg.version + ' готов') }
         refresh()
       } else if (msg.type === 'selection') {
         selection = msg; refresh()
