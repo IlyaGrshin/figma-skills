@@ -84,6 +84,8 @@
   </div>
 
   <script>
+  // Own scope: PropsKit (fig.js) already defines globals such as `$`.
+  (() => {
     function post(message) { parent.postMessage({ pluginMessage: message }, '*') }
     const $ = (id) => document.getElementById(id)
     const SCOPE_LABEL = { selection: 'выделение', page: 'страница', file: 'весь файл' }
@@ -225,6 +227,7 @@
     if (typeof ResizeObserver !== 'undefined') {
       new ResizeObserver(() => { if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(reportHeight) }).observe($('plugin-root'))
     }
+  })()
   </script>
 </body>
 </html>
