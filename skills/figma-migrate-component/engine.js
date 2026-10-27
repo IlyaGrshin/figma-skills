@@ -17,8 +17,9 @@ H.main = async (n) => {
 };
 
 // The root's own visibility doesn't count: hidden rows are migrated too (and stay hidden).
+// Compare ids: `parent` may return a different object for the same layer.
 H.isShown = (node, root) => {
-  for (let n = node; n && n !== root; n = n.parent) if (!n.visible) return false;
+  for (let n = node; n && n.id !== root.id; n = n.parent) if (!n.visible) return false;
   return true;
 };
 
