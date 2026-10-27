@@ -163,11 +163,14 @@ const scopes = PARAMS.scopeIds && PARAMS.scopeIds.length
 
 const candidates = [];
 const lockedIn = {};
+let otherLibrary = 0;
 for (const scope of scopes) {
   const list = scope.type === 'INSTANCE' ? [scope] : scope.findAllWithCriteria({ types: ['INSTANCE'] });
   for (const n of list) {
     const m = await H.main(n);
     if (!m || !RECIPE.sourceSets.includes(m.setName)) continue;
+    // same name from another library (e.g. Android) is not ours
+    if (RECIPE.sourceKeys && !RECIPE.sourceKeys.includes((m.set || m.mc).key)) { otherLibrary++; continue; }
     const lock = lockingInstance(n);
     if (lock) {
       const lm = await H.main(lock);
@@ -183,12 +186,16 @@ const target = RECIPE.target.isSet
   ? (await figma.importComponentSetByKeyAsync(RECIPE.target.key)).defaultVariant
   : await figma.importComponentByKeyAsync(RECIPE.target.key);
 
-const report = { recipe: RECIPE.name, mode: PARAMS.mode, found: candidates.length, lockedInLibraryComponents: lockedIn, migrated: [], wouldMigrate: 0, skipped: [], failed: [] };
-const where = (n) => { const f = []; for (let p = n.parent; p && p.type !== 'PAGE'; p = p.parent) if (p.parent && (p.parent.type === 'PAGE' || p.parent.type === 'SECTION')) { f.push(p.name); break; } return f.join(''); };
+const report = { recipe: RECIPE.name, mode: PARAMS.mode, found: candidates.length, otherLibrary, lockedInLibraryComponents: lockedIn, migrated: [], wouldMigrate: 0, skipped: [], failed: [] };
+// the screen = top-level frame on the page or inside a section
+const screenOf = (n) => { for (let p = n.parent; p && p.type !== 'PAGE'; p = p.parent) if (p.parent && (p.parent.type === 'PAGE' || p.parent.type === 'SECTION')) return p; return null; };
+const where = (n) => { const s = screenOf(n); return s ? s.name : ''; };
 
 const touched = new Set();
 for (const old of candidates.slice(0, PARAMS.limit || 300)) {
   const label = { id: old.id, screen: where(old), texts: H.visibleTexts(old).join(' | ').slice(0, 80) };
+  const guard = RECIPE.guardScreen && RECIPE.guardScreen(screenOf(old));
+  if (guard) { report.skipped.push({ ...label, reason: guard }); continue; }
   let ex;
   try { ex = await RECIPE.extract(old, H); } catch (e) { report.failed.push({ ...label, reason: 'extract: ' + e.message }); continue; }
   if (ex.skip) { report.skipped.push({ ...label, reason: ex.skip }); continue; }

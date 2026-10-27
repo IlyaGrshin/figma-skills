@@ -77,6 +77,10 @@ Load `figma:figma-use` first (mandatory before `use_figma`).
 3. Write `recipes/<name>.js` defining `const RECIPE = { name, sourceSets,
    target: { key, isSet }, extract, build }`:
    - `sourceSets` — component (set) names whose instances are migrated.
+   - `sourceKeys` (optional) — keys of the source sets. Use them when another
+     library (e.g. Android) has components with the same names.
+   - `guardScreen(screen)` (optional) — return a reason to skip a whole
+     screen, e.g. Android mockups (360px wide) for an iOS recipe.
    - `target.key` — published key of the new component (or set; `isSet:
      true` uses its default variant).
    - `extract(old, H)` returns `{ model }` or `{ skip: 'reason' }`. Keep

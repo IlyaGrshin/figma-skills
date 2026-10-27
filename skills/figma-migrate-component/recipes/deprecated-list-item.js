@@ -3,13 +3,18 @@
 // swappable Left / Body / Right parts. New row = "List Item" with nested
 // "List Item / Left | Body | Right" variant sets. Texts in both live in Train / Text.
 
-const LEFT = { 'Avatar': 'Avatar', 'Product Icon': 'Coin', 'Transaction Icon': 'Circle Icon', 'Icon Square': 'Icon Square' };
+const LEFT = { 'Avatar': 'Avatar', 'Product Icon': 'Coin', 'Transaction Icon': 'Circle Icon', 'Icon Square': 'Icon Square', 'Placeholder': 'Placeholder', 'Icon': 'Icon' };
 const BODY_TYPE = { 'Regular': 'Regular', 'Accent': 'Accent', 'Destructive': 'Destructive', 'Text Placeholder': 'Placeholder' };
 
 const RECIPE = {
   name: '(Deprecated) List Item → List Item',
   sourceSets: ['(Deprecated) List Item', '(Deprecated) List Item / Body'],
+  // Keys of the iOS library sets above. The Android library reuses the same
+  // component names, so names alone are not enough to pick iOS rows.
+  sourceKeys: ['d4037f9d28891cc8f824217ffbcff8b4ab2bd4f4', '5ee5ecb2cefb3283024a88e3534058d929cbe24f'],
   target: { key: '308e3f5810c2de64b57ee01fd1c5df259841fce2', isSet: false },
+  // iOS screens are 375–440 wide; Android mockups here are 360.
+  guardScreen: (screen) => screen && screen.width <= 360 ? 'android screen (360px) — not an iOS recipe' : null,
 
   async extract(old, H) {
     const ov = H.overrideMap(old);
@@ -54,12 +59,12 @@ const RECIPE = {
     // Body
     const b = { badge: null };
     if (body.kind === '1 Line') {
-      if (body.p.Dropdown === 'True' || body.p.Counter === 'True') return { skip: 'body: dropdown/counter' };
+      if (body.p.Dropdown === 'True' || body.p.Counter === 'True') return { skip: 'body: inline dropdown/counter — no counterpart in List Item (library gap)' };
       if (!BODY_TYPE[body.p.Type]) return { skip: 'body type: ' + body.p.Type };
       b.type = BODY_TYPE[body.p.Type];
       b.title = { kind: 'text', node: text(body.n, 'Label') };
     } else if (body.kind === '2 Line') {
-      if (body.p.Action === 'True') return { skip: 'body: action' };
+      if (body.p.Action === 'True') return { skip: 'body: action link under title — no counterpart in List Item (library gap)' };
       if (body.p.Compact === 'True') notes.push('was compact');
       if (/Medium/.test(body.p.Type)) notes.push('title was medium weight');
       b.type = 'Regular';
@@ -98,6 +103,7 @@ const RECIPE = {
       else if (k === 'Checkmark') Object.assign(r, { lines: '1 Line', type: 'Checkmark' });
       else if (k === 'Clear') Object.assign(r, { lines: '1 Line', type: 'Clear' });
       else if (k === 'Switch') Object.assign(r, { lines: '1 Line', type: 'Switch', control: await inst(right.n, 'Switch') });
+      else if (k === 'Button') Object.assign(r, { lines: '1 Line', type: 'Button', control: await inst(right.n, 'Button') });
       else return { skip: 'right: ' + k };
       if ((r.title && !r.title.node) || (r.subtitle && !r.subtitle.node)) {
         // e.g. subtitle hidden in the old row → fall back to one line
@@ -154,7 +160,11 @@ const RECIPE = {
       H.setProps(R, { Lines: m.right.lines, Type: m.right.type });
       if (m.right.title) await fill(R, 'Title', m.right.title);
       if (m.right.subtitle) await fill(R, 'Subtitle', m.right.subtitle);
-      if (m.right.control) await H.transplant(m.right.control, R.findOne(n => n.type === 'INSTANCE' && n.name === 'Switch'), m.ov);
+      if (m.right.control) {
+        const slot = R.findOne(n => n.type === 'INSTANCE' && n.name === m.right.type); // "Switch" / "Button"
+        if (!slot) throw new Error(`no ${m.right.type} in new Right`);
+        await H.transplant(m.right.control, slot, m.ov);
+      }
       if (m.right.icon) await H.transplant(m.right.icon, R.findOne(n => n.type === 'INSTANCE' && n.name === 'Icon'), m.ov);
     }
 
