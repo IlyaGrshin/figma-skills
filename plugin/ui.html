@@ -145,7 +145,10 @@
       const notes = Object.entries(report.notes)
       if (notes.length) line('Заметки: ' + notes.map(([k, v]) => k + ' ×' + v).join(', '))
       if (report.otherLibrary) line('Одноимённые компоненты другой библиотеки (не тронуты): ' + report.otherLibrary)
-      line(report.seconds + ' с · ' + SCOPE_LABEL[report.scope] + ' · v' + report.version, 'muted')
+      line(report.seconds + ' с · ' + SCOPE_LABEL[report.scope] + ' · v' + report.version + (report.reusedCheck ? ' · без повторного поиска' : ''), 'muted')
+      const T = report.timingMs || {}
+      const sec = (v) => ((v || 0) / 1000).toFixed(1)
+      line('поиск ' + sec(T.search) + ' · разбор ' + sec(T.extract) + (report.mode === 'apply' ? ' · сборка ' + sec(T.build) + ' · сверка ' + sec(T.verify) + ' · запись ' + sec(T.commit) : '') + ' с', 'muted')
       box.classList.remove('hidden')
 
       const bad = report.items.filter(i => i.result !== 'migrated')

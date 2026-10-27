@@ -7,11 +7,12 @@
 // frames, slots), so it uses one loose type instead of per-type unions.
 type Loose = ReturnType<typeof JSON.parse>
 
-const VERSION = '1.0.1'
+const VERSION = '1.1.0'
 const PANEL_WIDTH = 360
 const DATA_NS = 'migrate_component' // shared plugin data namespace for the last report
 const REPORT_KEY = 'last_report'
 const MAX_REPORT_CHARS = 90000
+const CHECK_TTL_MS = 15 * 60 * 1000 // Replace reuses a check this fresh instead of searching again
 
 // ===================================================================== recipes
 
@@ -193,19 +194,22 @@ const RECIPES: Loose[] = [LIST_ITEM]
 // ====================================================================== engine
 
 const H: Loose = {}
-H.main = async (n: Loose) => {
+const mainOf = async (n: Loose) => {
   const mc = await n.getMainComponentAsync()
   if (!mc) return null
   const set = mc.parent && mc.parent.type === 'COMPONENT_SET' ? mc.parent : null
   return { mc, set, setName: set ? set.name : mc.name }
 }
-// Cached lookup for the read-only search phase only: nodes inside a freshly
-// built instance keep their ids while their variant changes.
+// Old layers never change, so their lookups are cached. Layers of the instance
+// being built keep their ids while variants change: never cache those
+// (its descendants' ids are 'I<id>;…').
 const mainCache = new Map<string, Loose>()
+let buildingId = ''
 const mainCached = async (n: Loose) => {
-  if (!mainCache.has(n.id)) mainCache.set(n.id, await H.main(n))
+  if (!mainCache.has(n.id)) mainCache.set(n.id, await mainOf(n))
   return mainCache.get(n.id)
 }
+H.main = (n: Loose) => buildingId && (n.id === buildingId || n.id.startsWith('I' + buildingId + ';')) ? mainOf(n) : mainCached(n)
 H.isShown = (node: Loose, root: Loose) => { for (let n: Loose = node; n && n !== root.parent; n = n.parent) if (!n.visible) return false; return true }
 H.isGlyph = (s: string) => [...s].every((ch: string) => { const c = ch.codePointAt(0) || 0; return (c >= 0xE000 && c <= 0xF8FF) || c >= 0xF0000 })
 H.visibleTexts = (root: Loose) => root.findAllWithCriteria({ types: ['TEXT'] }).filter((t: Loose) => H.isShown(t, root)).map((t: Loose) => t.characters.trim()).filter((s: Loose) => s && !H.isGlyph(s)).sort()
@@ -231,9 +235,16 @@ H.setProps = (inst: Loose, byPrefix: Loose) => {
 }
 H.shownInstances = (root: Loose) => root.findAllWithCriteria({ types: ['INSTANCE'] }).filter((n: Loose) => H.isShown(n, root))
 H.firstText = (root: Loose) => root.findAllWithCriteria({ types: ['TEXT'] }).find((t: Loose) => H.isShown(t, root))
+const loadedFonts = new Set<string>()
+H.loadFont = async (f: Loose) => {
+  const k = f.family + '|' + f.style
+  if (loadedFonts.has(k)) return
+  await figma.loadFontAsync(f)
+  loadedFonts.add(k)
+}
 H.loadFonts = async (t: Loose) => {
   const fonts = t.characters.length ? t.getRangeAllFontNames(0, t.characters.length) : [t.fontName]
-  for (const f of fonts) await figma.loadFontAsync(f)
+  for (const f of fonts) await H.loadFont(f)
 }
 H.setText = async (t: Loose, str: string) => { if (t.characters === str) return; await H.loadFonts(t); t.characters = str }
 
@@ -249,7 +260,7 @@ H.copyTextOverrides = async (src: Loose, dst: Loose, ov: Loose) => {
   if (mixed && src.characters === dst.characters) {
     const segs = src.getStyledTextSegments(['fills', 'fillStyleId', 'fontName', 'textStyleId'])
     await H.loadFonts(dst)
-    for (const s of segs) await figma.loadFontAsync(s.fontName)
+    for (const s of segs) await H.loadFont(s.fontName)
     for (const s of segs) {
       if (src.textStyleId === figma.mixed && s.textStyleId) await dst.setRangeTextStyleIdAsync(s.start, s.end, s.textStyleId)
       if (src.fontName === figma.mixed) dst.setRangeFontName(s.start, s.end, s.fontName)
@@ -261,7 +272,7 @@ H.copyTextOverrides = async (src: Loose, dst: Loose, ov: Loose) => {
   const f = ov.get(src.id) || []
   if (f.includes('fills') && src.fills !== figma.mixed) dst.fills = src.fills
   if (f.includes('textStyleId') && src.textStyleId !== figma.mixed) { await H.loadFonts(dst); await dst.setTextStyleIdAsync(src.textStyleId) }
-  if (f.includes('fontName') && src.fontName !== figma.mixed) { await figma.loadFontAsync(src.fontName); await H.loadFonts(dst); dst.fontName = src.fontName }
+  if (f.includes('fontName') && src.fontName !== figma.mixed) { await H.loadFont(src.fontName); await H.loadFonts(dst); dst.fontName = src.fontName }
 }
 // Make dst look like src: component/variant, props, texts, visual overrides, recursively.
 H.transplant = async (src: Loose, dst: Loose, ov: Loose) => {
@@ -349,9 +360,20 @@ const log = (text: string, level?: string) => post({ type: 'log', text, level: l
 const tick = () => new Promise<void>((r: Loose) => setTimeout(r, 0))
 
 let running = false
+// Last successful check: candidate ids per page, so Replace can skip the search.
+let lastCheck: Loose = null
+const scopeKey = (recipe: Loose, scope: string) => recipe.id + '|' + scope + '|' + (
+  scope === 'selection' ? figma.currentPage.selection.map((n: Loose) => n.id).sort().join(',')
+    : scope === 'page' ? figma.currentPage.id : 'file')
+const ms = (t: number) => Date.now() - t
 
 async function collect(recipe: Loose, roots: Loose[], stats: Loose) {
   const out: Loose[] = []
+  // Hidden layers inside instances can't be rows anyone sees; not walking them
+  // is much faster. Search only: building relies on full child lists.
+  const prevSkip = figma.skipInvisibleInstanceChildren
+  figma.skipInvisibleInstanceChildren = true
+  try {
   for (const root of roots) {
     const list = root.type === 'INSTANCE' ? [root] : root.findAllWithCriteria({ types: ['INSTANCE'] })
     let seen = 0
@@ -371,6 +393,7 @@ async function collect(recipe: Loose, roots: Loose[], stats: Loose) {
       out.push(n)
     }
   }
+  } finally { figma.skipInvisibleInstanceChildren = prevSkip }
   return out
 }
 
@@ -381,11 +404,17 @@ async function run(mode: string, scope: string, recipeId: string) {
   const recipe = RECIPES.find((r: Loose) => r.id === recipeId) || RECIPES[0]
   const startPage = figma.currentPage
   const started = Date.now()
+  const checkKey = scopeKey(recipe, scope)
+  const reuse = mode === 'apply' && lastCheck && lastCheck.key === checkKey && ms(lastCheck.at) < CHECK_TTL_MS ? lastCheck : null
+  const check: Loose = mode === 'apply' ? null : { key: checkKey, at: started, pages: {} }
+  lastCheck = null // a check is good for one Replace only
+  const T: Record<string, number> = { search: 0, extract: 0, build: 0, verify: 0, commit: 0 }
   const report: Loose = {
     tool: 'Migrate component', version: VERSION, recipe: recipe.id, mode, scope,
     file: figma.root.name, startedAt: new Date(started).toISOString(),
     totals: { found: 0, migrated: 0, wouldMigrate: 0, skipped: 0, failed: 0 },
     otherLibrary: 0, lockedIn: {}, skippedByReason: {}, failedByReason: {}, notes: {}, pages: [], items: [],
+    reusedCheck: !!reuse, timingMs: T,
   }
   try {
     let plan: Loose[] // [{ page, roots }]
@@ -400,12 +429,25 @@ async function run(mode: string, scope: string, recipeId: string) {
     const target = recipe.target.isSet
       ? (await figma.importComponentSetByKeyAsync(recipe.target.key)).defaultVariant
       : await figma.importComponentByKeyAsync(recipe.target.key)
+    if (reuse) log('Беру строки из последней проверки — поиск пропущен')
 
     for (const step of plan) {
       const page = step.page
+      const cached = reuse ? reuse.pages[page.id] : null
+      if (reuse && !cached) continue // nothing there at check time
       if (scope === 'file') { await figma.setCurrentPageAsync(page); step.roots = [page] }
-      const stats: Loose = { otherLibrary: 0, lockedIn: {} }
-      const candidates = await collect(recipe, step.roots, stats)
+      let stats: Loose = { otherLibrary: 0, lockedIn: {} }
+      let candidates: Loose[] = []
+      let t = Date.now()
+      if (cached) {
+        stats = { otherLibrary: cached.otherLibrary, lockedIn: cached.lockedIn }
+        for (const id of cached.ids) {
+          const n = await figma.getNodeByIdAsync(id)
+          if (n && !n.removed && n.type === 'INSTANCE') candidates.push(n)
+        }
+      } else candidates = await collect(recipe, step.roots, stats)
+      T.search += ms(t)
+      if (check && candidates.length) check.pages[page.id] = { ids: candidates.map((n: Loose) => n.id), otherLibrary: stats.otherLibrary, lockedIn: stats.lockedIn }
       report.otherLibrary += stats.otherLibrary
       for (const [k, v] of Object.entries<number>(stats.lockedIn)) report.lockedIn[k] = (report.lockedIn[k] || 0) + v
       const pageRow: Loose = { page: page.name, pageId: page.id, found: candidates.length, migrated: 0, skipped: 0, failed: 0 }
@@ -420,11 +462,14 @@ async function run(mode: string, scope: string, recipeId: string) {
         i++
         if (i % 20 === 0) { post({ type: 'progress', text: `«${page.name}»: ${i}/${candidates.length}` }); await tick() }
         const scr = screenOf(old)
-        const item: Loose = { page: page.name, screen: scr ? scr.name : '', screenId: scr ? scr.id : null, id: old.id, texts: H.visibleTexts(old).join(' | ').slice(0, 80) }
+        t = Date.now()
+        const before = H.visibleTexts(old)
+        const item: Loose = { page: page.name, screen: scr ? scr.name : '', screenId: scr ? scr.id : null, id: old.id, texts: before.join(' | ').slice(0, 80) }
         const guard = recipe.guardScreen && recipe.guardScreen(scr)
         let ex: Loose
         if (guard) ex = { skip: guard }
         else { try { ex = await recipe.extract(old, H) } catch (e) { ex = { error: 'extract: ' + (e as Error).message } } }
+        T.extract += ms(t)
         if (ex.skip || ex.error) {
           const key = ex.skip ? 'skipped' : 'failed'
           const reason = ex.skip || ex.error
@@ -435,17 +480,20 @@ async function run(mode: string, scope: string, recipeId: string) {
         }
         if (mode !== 'apply') { report.totals.wouldMigrate++; continue }
 
-        const before = H.visibleTexts(old)
         const beforeColours = H.multiColourTexts(old)
+        t = Date.now()
         const neu = target.createInstance()
         try {
           H.place(old, neu)
+          buildingId = neu.id // after placing: ids may change when moved into a slot
           const commit = await recipe.build(neu, ex.model, H)
           await H.copyVisualOverrides(old, neu, H.overrideMap(old))
+          T.build += ms(t); t = Date.now()
           const after = H.visibleTexts(neu)
           if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('text mismatch: [' + before.join(', ') + '] → [' + after.join(', ') + ']')
           const afterColours = H.multiColourTexts(neu)
           for (const [txt, sig] of Object.entries<string>(beforeColours)) if (afterColours[txt] !== sig) throw new Error('multi-colour text lost its colours: "' + txt + '"')
+          T.verify += ms(t); t = Date.now()
           if (typeof commit === 'function') await commit()
           if (Math.abs(old.height - neu.height) > 1) ex.model.notes.push('height ' + Math.round(old.height) + '→' + Math.round(neu.height))
           touched.add(neu.parent)
@@ -453,17 +501,22 @@ async function run(mode: string, scope: string, recipeId: string) {
           report.totals.migrated++; pageRow.migrated++
           for (const n of ex.model.notes) report.notes[n] = (report.notes[n] || 0) + 1
           report.items.push(Object.assign(item, { result: 'migrated', newId: neu.id, notes: ex.model.notes }))
+          T.commit += ms(t)
         } catch (e) {
+          T.build += ms(t)
           neu.remove()
           report.totals.failed++; pageRow.failed++
           report.failedByReason[(e as Error).message] = (report.failedByReason[(e as Error).message] || 0) + 1
           report.items.push(Object.assign(item, { result: 'failed', reason: (e as Error).message }))
           log(`Откат: ${item.screen} — ${(e as Error).message}`, 'warn')
-        }
+        } finally { buildingId = '' }
       }
+      t = Date.now()
       for (const p of touched) H.reflow(p)
+      T.commit += ms(t)
       log(`«${page.name}»: ${mode === 'apply' ? 'заменено ' + pageRow.migrated : 'к замене ' + (candidates.length - pageRow.skipped - pageRow.failed)}, пропущено ${pageRow.skipped}, ошибок ${pageRow.failed}`)
     }
+    if (check) lastCheck = check
   } catch (e) {
     report.error = (e as Error).message
     log('Ошибка: ' + (e as Error).message, 'error')
