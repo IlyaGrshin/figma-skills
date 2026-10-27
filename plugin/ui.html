@@ -1,0 +1,205 @@
+<!doctype html>
+<html>
+<head>
+  <style>
+    html, body { margin: 0; padding: 0; height: auto; min-height: 0; }
+    body { display: block; font-family: var(--font-family); }
+    #plugin-root { height: auto; }
+    body > #plugin-root > fig-footer {
+      background-color: var(--figma-color-bg);
+      box-shadow: inset 0 1px 0 0 var(--figma-color-border);
+      border-radius: 0 0 var(--radius-large) var(--radius-large);
+    }
+    .muted { color: var(--figma-color-text-secondary); font-size: 11px; }
+    #summary { font-size: 11px; line-height: 16px; color: var(--figma-color-text); }
+    #summary b { font-weight: 600; }
+    #console {
+      font-family: var(--font-family-mono, ui-monospace, monospace);
+      font-size: 10px; line-height: 14px;
+      background: var(--figma-color-bg-secondary);
+      border: 1px solid var(--figma-color-border);
+      border-radius: var(--radius-medium, 4px);
+      padding: 6px 8px; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    }
+    #console .warn { color: var(--figma-color-text-warning); }
+    #console .error { color: var(--figma-color-text-danger); }
+    #items { max-height: 180px; overflow-y: auto; font-size: 11px; }
+    #items .row { padding: 4px 6px; border-radius: 4px; cursor: pointer; display: block; }
+    #items .row:hover { background: var(--figma-color-bg-hover); }
+    #items .reason { color: var(--figma-color-text-secondary); display: block; font-size: 10px; }
+    #items .failed .title { color: var(--figma-color-text-danger); }
+    .section-title { font-size: 11px; font-weight: 600; margin: 4px 0 2px; }
+    .hidden { display: none !important; }
+    fig-footer .buttons { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  </style>
+</head>
+<body>
+  <div id="plugin-root">
+    <fig-content>
+      <fig-field>
+        <label>Компонент</label>
+        <!-- keep in sync with RECIPES in code.ts -->
+        <fig-dropdown id="recipe">
+          <option value="deprecated-list-item" selected>(Deprecated) List Item → List Item (iOS)</option>
+        </fig-dropdown>
+      </fig-field>
+      <fig-field>
+        <label>Область</label>
+        <fig-dropdown id="scope">
+          <option value="selection">Выделенные экраны</option>
+          <option value="page" selected>Текущая страница</option>
+          <option value="file">Весь файл</option>
+        </fig-dropdown>
+      </fig-field>
+      <div id="selinfo" class="muted">…</div>
+
+      <div id="summary" class="hidden"></div>
+      <div id="itemsWrap" class="hidden">
+        <div class="section-title">Не заменено — кликните, чтобы перейти к слою</div>
+        <div id="items"></div>
+      </div>
+
+      <div class="section-title">Консоль</div>
+      <div id="console"></div>
+    </fig-content>
+    <fig-footer sticky>
+      <label id="status" class="muted">Сначала нажмите «Проверить»</label>
+      <div class="buttons">
+        <fig-button id="copy" variant="secondary" disabled>Скопировать отчёт</fig-button>
+        <fig-button id="dry" variant="secondary">Проверить</fig-button>
+        <fig-button id="apply" type="submit" disabled>Заменить</fig-button>
+      </div>
+    </fig-footer>
+    <textarea id="clip" style="position:absolute;left:-9999px;top:0;height:1px;width:1px"></textarea>
+  </div>
+
+  <script>
+    function post(message) { parent.postMessage({ pluginMessage: message }, '*') }
+    const $ = (id) => document.getElementById(id)
+    const SCOPE_LABEL = { selection: 'выделение', page: 'страница', file: 'весь файл' }
+
+    let lastReport = null
+    let checkedKey = null // recipe|scope that passed a dry run; Apply needs it
+    let selection = { count: 0, page: '' }
+    let busy = false
+
+    const current = () => ({ recipe: $('recipe').value || 'deprecated-list-item', scope: $('scope').value || 'page' })
+    const keyOf = (c) => c.recipe + '|' + c.scope
+
+    function log(text, level) {
+      const line = document.createElement('div')
+      if (level) line.className = level
+      line.textContent = new Date().toLocaleTimeString() + '  ' + text
+      $('console').appendChild(line)
+      $('console').scrollTop = $('console').scrollHeight
+    }
+
+    function refresh() {
+      const c = current()
+      $('selinfo').textContent = c.scope === 'selection'
+        ? (selection.count ? 'Выделено слоёв: ' + selection.count + ' · страница «' + selection.page + '»' : 'Выделите экраны или секции')
+        : c.scope === 'page' ? 'Страница «' + selection.page + '»' : 'Все страницы файла'
+      const needSel = c.scope === 'selection' && !selection.count
+      setDisabled('dry', busy || needSel)
+      setDisabled('apply', busy || needSel || checkedKey !== keyOf(c))
+      setDisabled('copy', busy || !lastReport)
+    }
+    function setDisabled(id, v) { if (v) $(id).setAttribute('disabled', '') ; else $(id).removeAttribute('disabled') }
+
+    function run(mode) {
+      const c = current()
+      busy = true
+      $('status').textContent = mode === 'apply' ? 'Заменяю…' : 'Проверяю…'
+      refresh()
+      post({ type: 'run', mode, scope: c.scope, recipe: c.recipe })
+    }
+
+    function render(report) {
+      const t = report.totals
+      const lines = []
+      if (report.mode === 'apply') lines.push('<b>Заменено: ' + t.migrated + '</b> из ' + t.found + ' · пропущено ' + t.skipped + ' · откатов ' + t.failed)
+      else lines.push('<b>Можно заменить: ' + t.wouldMigrate + '</b> из ' + t.found + ' · пропуск ' + t.skipped + ' · ошибок ' + t.failed)
+      const locked = Object.entries(report.lockedIn)
+      if (locked.length) lines.push('Внутри библиотечных компонентов (исправлять в библиотеке): ' + locked.map(([k, v]) => k + ' ' + v).join(', '))
+      const notes = Object.entries(report.notes)
+      if (notes.length) lines.push('Заметки: ' + notes.map(([k, v]) => k + ' ×' + v).join(', '))
+      if (report.otherLibrary) lines.push('Одноимённые компоненты другой библиотеки (не тронуты): ' + report.otherLibrary)
+      lines.push('<span class="muted">' + report.seconds + ' с · ' + SCOPE_LABEL[report.scope] + ' · v' + report.version + '</span>')
+      $('summary').innerHTML = lines.join('<br>')
+      $('summary').classList.remove('hidden')
+
+      const bad = report.items.filter(i => i.result !== 'migrated')
+      $('items').innerHTML = ''
+      for (const i of bad.slice(0, 300)) {
+        const row = document.createElement('span')
+        row.className = 'row ' + i.result
+        const title = document.createElement('span')
+        title.className = 'title'
+        title.textContent = (i.result === 'failed' ? '⚠ ' : '') + (i.screen || i.page) + (i.texts ? ' — ' + i.texts : '')
+        const reason = document.createElement('span')
+        reason.className = 'reason'
+        reason.textContent = i.reason
+        row.appendChild(title); row.appendChild(reason)
+        row.addEventListener('click', () => post({ type: 'focus', id: i.id }))
+        $('items').appendChild(row)
+      }
+      $('itemsWrap').classList.toggle('hidden', !bad.length)
+    }
+
+    function copyReport() {
+      if (!lastReport) return
+      const text = 'Migrate component report\n' + JSON.stringify(lastReport, null, 1)
+      const done = () => { log('Отчёт скопирован — вставьте его в чат с Claude'); post({ type: 'notify', text: 'Отчёт скопирован' }) }
+      const fallback = () => {
+        const ta = $('clip')
+        ta.value = text; ta.focus(); ta.select()
+        try { document.execCommand('copy') ? done() : log('Не удалось скопировать. Отчёт также сохранён в файле — Claude прочитает его сам.', 'warn') }
+        catch (e) { log('Не удалось скопировать: ' + e.message, 'warn') }
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback)
+      else fallback()
+    }
+
+    $('dry').addEventListener('click', () => run('dry'))
+    $('apply').addEventListener('click', () => run('apply'))
+    $('copy').addEventListener('click', copyReport)
+    $('scope').addEventListener('change', refresh)
+    $('recipe').addEventListener('change', refresh)
+
+    window.onmessage = (event) => {
+      const msg = event.data && event.data.pluginMessage
+      if (!msg) return
+      if (msg.type === 'init') {
+        log('Migrate component v' + msg.version + ' готов')
+        refresh()
+      } else if (msg.type === 'selection') {
+        selection = msg; refresh()
+      } else if (msg.type === 'log') {
+        log(msg.text, msg.level === 'info' ? '' : msg.level)
+      } else if (msg.type === 'progress') {
+        $('status').textContent = msg.text
+      } else if (msg.type === 'done') {
+        busy = false
+        if (msg.report) {
+          lastReport = msg.report
+          render(msg.report)
+          const c = { recipe: msg.report.recipe, scope: msg.report.scope }
+          // After a dry run the same scope can be applied; after apply, check again.
+          checkedKey = msg.report.mode === 'dry' && !msg.report.error ? keyOf(c) : null
+          $('status').textContent = msg.report.mode === 'dry' ? 'Проверено — можно заменять' : 'Готово. Отчёт сохранён в файле'
+        } else $('status').textContent = 'Сначала нажмите «Проверить»'
+        refresh()
+      }
+    }
+
+    let lastHeight = 0, raf = 0
+    function reportHeight() {
+      const h = Math.ceil($('plugin-root').getBoundingClientRect().height)
+      if (h && h !== lastHeight) { lastHeight = h; post({ type: 'resize', height: h }) }
+    }
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(() => { if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(reportHeight) }).observe($('plugin-root'))
+    }
+  </script>
+</body>
+</html>
