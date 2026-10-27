@@ -136,10 +136,18 @@ H.transplant = async (src, dst, ov) => {
     if (sc.length === dc.length) for (let i = 0; i < sc.length; i++) await H.transplant(sc[i], dc[i], ov);
     else {
       // Structure differs (e.g. src comes from an outdated library version):
-      // pair children by name and hide what src doesn't have.
-      const used = new Set();
+      // pair children by name, then the rest by kind (same component set /
+      // both texts) in order, and hide what src doesn't have.
+      const used = new Set(), rest = [];
       for (const d of dc) {
         const s = sc.find(x => x.name === d.name && !used.has(x.id));
+        if (s) { used.add(s.id); await H.transplant(s, d, ov); } else rest.push(d);
+      }
+      const kind = async (n) => n.type === 'INSTANCE' ? 'I:' + ((await H.main(n)) || {}).setName : n.type;
+      for (const d of rest) {
+        const dk = await kind(d);
+        let s = null;
+        for (const x of sc) if (!used.has(x.id) && x.visible && await kind(x) === dk) { s = x; break; }
         if (s) { used.add(s.id); await H.transplant(s, d, ov); }
         else if (d.visible) d.visible = false;
       }
