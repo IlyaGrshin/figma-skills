@@ -116,20 +116,25 @@
 
     function render(report) {
       const t = report.totals
-      const lines = []
-      if (report.mode === 'apply') lines.push('<b>Заменено: ' + t.migrated + '</b> из ' + t.found + ' · пропущено ' + t.skipped + ' · откатов ' + t.failed)
-      else lines.push('<b>Можно заменить: ' + t.wouldMigrate + '</b> из ' + t.found + ' · пропуск ' + t.skipped + ' · ошибок ' + t.failed)
+      // Names come from the document (component sets, notes): text only, never HTML.
+      const box = $('summary')
+      box.textContent = ''
+      const line = (text, cls) => { const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = text; box.appendChild(d) }
+      const head = document.createElement('div')
+      const strong = document.createElement('b')
+      if (report.mode === 'apply') { strong.textContent = 'Заменено: ' + t.migrated; head.append(strong, ' из ' + t.found + ' · пропущено ' + t.skipped + ' · откатов ' + t.failed) }
+      else { strong.textContent = 'Можно заменить: ' + t.wouldMigrate; head.append(strong, ' из ' + t.found + ' · пропуск ' + t.skipped + ' · ошибок ' + t.failed) }
+      box.appendChild(head)
       const locked = Object.entries(report.lockedIn)
-      if (locked.length) lines.push('Внутри библиотечных компонентов (исправлять в библиотеке): ' + locked.map(([k, v]) => k + ' ' + v).join(', '))
+      if (locked.length) line('Внутри библиотечных компонентов (исправлять в библиотеке): ' + locked.map(([k, v]) => k + ' ' + v).join(', '))
       const notes = Object.entries(report.notes)
-      if (notes.length) lines.push('Заметки: ' + notes.map(([k, v]) => k + ' ×' + v).join(', '))
-      if (report.otherLibrary) lines.push('Одноимённые компоненты другой библиотеки (не тронуты): ' + report.otherLibrary)
-      lines.push('<span class="muted">' + report.seconds + ' с · ' + SCOPE_LABEL[report.scope] + ' · v' + report.version + '</span>')
-      $('summary').innerHTML = lines.join('<br>')
-      $('summary').classList.remove('hidden')
+      if (notes.length) line('Заметки: ' + notes.map(([k, v]) => k + ' ×' + v).join(', '))
+      if (report.otherLibrary) line('Одноимённые компоненты другой библиотеки (не тронуты): ' + report.otherLibrary)
+      line(report.seconds + ' с · ' + SCOPE_LABEL[report.scope] + ' · v' + report.version, 'muted')
+      box.classList.remove('hidden')
 
       const bad = report.items.filter(i => i.result !== 'migrated')
-      $('items').innerHTML = ''
+      $('items').textContent = ''
       for (const i of bad.slice(0, 300)) {
         const row = document.createElement('span')
         row.className = 'row ' + i.result
