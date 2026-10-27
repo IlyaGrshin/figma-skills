@@ -57,6 +57,8 @@ Load `figma:figma-use` first (mandatory before `use_figma`).
 - Visible text (excluding SF Symbol glyphs) of the new instance must equal
   the old one as a multiset, otherwise the new instance is deleted and the
   old one stays. So text content is never silently lost.
+- Texts coloured in parts (e.g. "$12.53B ↑ 0.88%" black + green) are copied
+  range by range and their per-range colours are verified too.
 - Instances inside other instances are not touched (they can't be edited),
   except inside a `SLOT`, whose content is editable.
 - Colour / text-style / font overrides are copied only if they were actually

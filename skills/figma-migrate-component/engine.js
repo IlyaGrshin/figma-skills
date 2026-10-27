@@ -30,6 +30,17 @@ H.visibleTexts = (root) => root.findAllWithCriteria({ types: ['TEXT'] })
   .filter(s => s && !H.isGlyph(s))
   .sort();
 
+// Texts coloured in parts, as "characters → colour per range". Comparing only
+// characters misses a multi-colour text that collapsed to one colour.
+H.multiColourTexts = (root) => {
+  const out = {};
+  for (const t of root.findAllWithCriteria({ types: ['TEXT'] })) {
+    if (!H.isShown(t, root) || t.fills !== figma.mixed) continue;
+    out[t.characters.trim()] = JSON.stringify(t.getStyledTextSegments(['fills']).map(s => [s.start, s.end, s.fills.map(p => p.type === 'SOLID' ? [p.color, p.opacity] : p.type)]));
+  }
+  return out;
+};
+
 H.overrideMap = (inst) => new Map((inst.overrides || []).map(o => [o.id, o.overriddenFields]));
 
 H.propKey = (inst, prefix) => Object.keys(inst.componentProperties).find(k => k === prefix || k.startsWith(prefix + '#'));
@@ -72,7 +83,22 @@ H.copyVisualOverrides = async (src, dst, ov) => {
 };
 
 // Copy only what was overridden on the source text (colour, style, font).
+// A text coloured in parts ("$12.53B" black + "↑ 0.88%" green) has mixed
+// fills: copy it range by range, otherwise the parts collapse to one colour.
 H.copyTextOverrides = async (src, dst, ov) => {
+  const mixed = src.fills === figma.mixed || src.fontName === figma.mixed || src.textStyleId === figma.mixed;
+  if (mixed && src.characters === dst.characters) {
+    const segs = src.getStyledTextSegments(['fills', 'fillStyleId', 'fontName', 'textStyleId']);
+    await H.loadFonts(dst);
+    for (const s of segs) await figma.loadFontAsync(s.fontName);
+    for (const s of segs) {
+      if (src.textStyleId === figma.mixed && s.textStyleId) await dst.setRangeTextStyleIdAsync(s.start, s.end, s.textStyleId);
+      if (src.fontName === figma.mixed) dst.setRangeFontName(s.start, s.end, s.fontName);
+      if (s.fillStyleId) await dst.setRangeFillStyleIdAsync(s.start, s.end, s.fillStyleId);
+      else dst.setRangeFills(s.start, s.end, s.fills);
+    }
+    return;
+  }
   const f = ov.get(src.id) || [];
   if (f.includes('fills') && src.fills !== figma.mixed) dst.fills = src.fills;
   if (f.includes('textStyleId') && src.textStyleId !== figma.mixed) { await H.loadFonts(dst); await dst.setTextStyleIdAsync(src.textStyleId); }
@@ -202,6 +228,7 @@ for (const old of candidates.slice(0, PARAMS.limit || 300)) {
   if (PARAMS.mode !== 'apply') { report.wouldMigrate++; continue; }
 
   const before = H.visibleTexts(old);
+  const beforeColours = H.multiColourTexts(old);
   const neu = target.createInstance();
   try {
     H.place(old, neu);
@@ -209,6 +236,9 @@ for (const old of candidates.slice(0, PARAMS.limit || 300)) {
     await H.copyVisualOverrides(old, neu, H.overrideMap(old)); // e.g. a recoloured row
     const after = H.visibleTexts(neu);
     if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error(`text mismatch: [${before.join(', ')}] → [${after.join(', ')}]`);
+    const afterColours = H.multiColourTexts(neu);
+    for (const [txt, sig] of Object.entries(beforeColours))
+      if (afterColours[txt] !== sig) throw new Error(`multi-colour text lost its colours: "${txt}"`);
     // changes outside the new instance happen only once it is verified
     if (typeof commit === 'function') await commit();
     if (Math.abs(old.height - neu.height) > 1) (ex.model.notes = ex.model.notes || []).push(`height ${Math.round(old.height)}→${Math.round(neu.height)}`);
